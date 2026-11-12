@@ -10,7 +10,7 @@
 
 LOG_DIR="${LOG_DIR:-$HOME/project-monitoring/logs}"
 LOG_FILE="$LOG_DIR/monitor.log"
-BAR_WIDTH=40
+BAR_COUNT=30   # jumlah bar / number of bars (2 kolom per bar)
 LINE_WIDTH=72
 
 # Membuat direktori log jika belum tersedia
@@ -27,8 +27,26 @@ if [[ ( -t 1 || -n "${FORCE_COLOR:-}" ) && -z "${NO_COLOR:-}" ]]; then
 else
   USE_COLOR=0; RED=""; ORG=""; WHT=""; DIM=""; RST=""
 fi
-# Gradasi teal -> biru untuk segmen bar
+# Gradasi teal -> biru untuk bar (truecolor jika didukung, 256 warna jika tidak)
 GRAD=(86 85 79 80 74 38 32 33 27 26 21)
+TRUECOLOR=0
+[[ ${COLORTERM:-} == *truecolor* || ${COLORTERM:-} == *24bit* ]] && TRUECOLOR=1
+# warna tiap bar dihitung sekali
+BAR_COLORS=()
+BAR_DIM=()
+if (( USE_COLOR )); then
+  for ((i = 0; i < BAR_COUNT; i++)); do
+    if (( TRUECOLOR )); then
+      r=$(( 96 + (40 - 96) * i / (BAR_COUNT - 1) ))
+      g=$(( 208 + (80 - 208) * i / (BAR_COUNT - 1) ))
+      b=$(( 190 + (240 - 190) * i / (BAR_COUNT - 1) ))
+      printf -v "BAR_COLORS[$i]" '\e[38;2;%d;%d;%dm' "$r" "$g" "$b"
+      printf -v "BAR_DIM[$i]" '\e[38;2;%d;%d;%dm' $(( r * 22 / 100 )) $(( g * 22 / 100 )) $(( b * 22 / 100 ))
+    else
+      printf -v "BAR_COLORS[$i]" '\e[38;5;%dm' "${GRAD[$(( i * ${#GRAD[@]} / BAR_COUNT ))]}"
+    fi
+  done
+fi
 
 # ---------- Helper tampilan ----------
 hr() {
@@ -41,22 +59,22 @@ hr() {
 # Format angka persen per-sepuluh (mis. 343 -> 34.3)
 fmt10() { printf '%d.%d' $(( $1 / 10 )) $(( $1 % 10 )); }
 
-# Bar segmen: argumen = persen per-sepuluh (0..1000)
-bar() {
-  local p10=$1 filled i c out=""
+# Satu baris bar 'pil' (row 0=atas, 1=tengah, 2=bawah); argumen kedua = persen per-sepuluh (0..1000)
+bar_row() {
+  local row=$1 p10=$2 filled i out="" glyph
   (( p10 > 1000 )) && p10=1000
   (( p10 < 0 )) && p10=0
-  filled=$(( p10 * BAR_WIDTH / 1000 ))
-  for ((i = 0; i < BAR_WIDTH; i++)); do
-    if (( USE_COLOR )); then
-      if (( i < filled )); then
-        c=${GRAD[$(( i * ${#GRAD[@]} / BAR_WIDTH ))]}
-        out+=$'\e[38;5;'"${c}"'m▮'
-      else
-        out+="${DIM}▮"
-      fi
+  filled=$(( (p10 * BAR_COUNT + 500) / 1000 ))
+  case $row in 0) glyph="▄" ;; 1) glyph="█" ;; *) glyph="▀" ;; esac
+  for ((i = 0; i < BAR_COUNT; i++)); do
+    if (( i < filled )); then
+      out+="${BAR_COLORS[i]:-}${glyph} "
+    elif (( USE_COLOR )); then
+      out+="${BAR_DIM[i]:-$DIM}${glyph} "
+    elif (( row == 1 )); then
+      out+="· "
     else
-      if (( i < filled )); then out+="#"; else out+="-"; fi
+      out+="  "
     fi
   done
   printf '%s%s' "$out" "$RST"
@@ -94,12 +112,15 @@ table() {
   done
 }
 
-# Satu blok SUBJECT: nomor, kode, nama, persen per-sepuluh, detail
+# Satu blok SUBJECT (3 baris bar + 1 baris detail): nomor, kode, nama, persen per-sepuluh, detail
 subject() {
   local no=$1 code=$2 name=$3 p10=$4 detail=$5
-  printf ' %sSUBJECT %s%s  %s  %s%6s%%%s  ' "$RED" "$no" "$RST" "$(bar "$p10")" "$ORG" "$(fmt10 "$p10")" "$RST"
-  status_colored "$p10"; printf '\n'
-  printf ' %s%-10s%s  %s%-7s%s %s%s%s\n' "$ORG" "$code" "$RST" "$RED" "$name" "$RST" "$WHT" "$detail" "$RST"
+  printf ' %sSUBJECT%s    %s\n' "$RED" "$RST" "$(bar_row 0 "$p10")"
+  printf ' %s%-11s%s%s\n' "$RED" "$no" "$RST" "$(bar_row 1 "$p10")"
+  printf ' %s%-11s%s%s\n' "$ORG" "$code" "$RST" "$(bar_row 2 "$p10")"
+  printf '%12s%s%5s%%%s  ' "" "$ORG" "$(fmt10 "$p10")" "$RST"
+  status_colored "$p10"
+  printf '   %s%s %s%s\n' "$WHT" "$name" "$detail" "$RST"
 }
 
 # ---------- Pengumpulan data ----------
@@ -150,7 +171,7 @@ show_header() {
   printf ' '; kv "ELAPSED" "$UPTIME_P"; printf '    '
   kv "PROCESSES" "$PROCS"; printf '    '; kv "LOAD" "$LOAD"; printf '\n'
   hr
-  printf '%s%14s%-10s%-10s%-10s%-10s%s%s\n' "$DIM" "" 0 25 50 75 100 "$RST"
+  printf '%s%12s%-14s%-15s%-14s%-13s%s%s\n' "$DIM" "" 0 25 50 75 100 "$RST"
 }
 
 sub_cpu()  { subject 00 "FIRST .C"  "CPU"    "$CPU10"  "${CPU_CORES} core   load $LOAD"; }
