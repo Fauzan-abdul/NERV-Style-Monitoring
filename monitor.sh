@@ -12,6 +12,8 @@ LOG_DIR="${LOG_DIR:-$HOME/project-monitoring/logs}"
 LOG_FILE="$LOG_DIR/monitor.log"
 BAR_COUNT=30   # jumlah bar / number of bars (2 kolom per bar)
 LINE_WIDTH=72
+# Interval refresh mode live (detik); bisa diubah: LIVE_INTERVAL=3 ./monitor.sh live
+LIVE_INTERVAL=${LIVE_INTERVAL:-1.5}
 
 # Membuat direktori log jika belum tersedia
 mkdir -p "$LOG_DIR"
@@ -124,16 +126,25 @@ subject() {
 }
 
 # ---------- Pengumpulan data ----------
+# Mode live memakai selisih dari frame sebelumnya (tanpa sleep), jadi tidak memblokir
+LIVE_MODE=0
+PREV_T=""; PREV_I=""
 cpu_sample() {
   local u n s i io irq sirq st t1 t2 i1 i2 dt di
   read -r _ u n s i io irq sirq st _ < /proc/stat
-  t1=$(( u + n + s + i + io + irq + sirq + st )); i1=$(( i + io ))
-  sleep 0.5
-  read -r _ u n s i io irq sirq st _ < /proc/stat
   t2=$(( u + n + s + i + io + irq + sirq + st )); i2=$(( i + io ))
+  if [[ -n $PREV_T ]]; then
+    t1=$PREV_T; i1=$PREV_I
+  else
+    t1=$t2; i1=$i2
+    sleep 0.5
+    read -r _ u n s i io irq sirq st _ < /proc/stat
+    t2=$(( u + n + s + i + io + irq + sirq + st )); i2=$(( i + io ))
+  fi
   dt=$(( t2 - t1 )); di=$(( i2 - i1 ))
   if (( dt > 0 )); then CPU10=$(( 1000 * (dt - di) / dt )); else CPU10=0; fi
-  CPU_CORES=$(nproc 2>/dev/null || echo 1)
+  if (( LIVE_MODE )); then PREV_T=$t2; PREV_I=$i2; fi
+  CPU_CORES=${CPU_CORES:-$(nproc 2>/dev/null || echo 1)}
 }
 
 mem_sample() {
@@ -215,10 +226,9 @@ write_log() {
   echo >> "$LOG_FILE"
 }
 
-# run_scope <cpu|mem|disk|all> [simpan_log: 1|0]
-run_scope() {
-  local scope=$1 dolog=${2:-1}
-  collect
+# Menampilkan satu layar penuh (tanpa mengumpulkan data)
+render_scope() {
+  local scope=$1
   show_header
   case $scope in
     cpu)  sub_cpu;  echo; det_cpu ;;
@@ -229,21 +239,44 @@ run_scope() {
       det_cpu; echo; det_mem; echo; det_disk ;;
   esac
   hr
+}
+
+# run_scope <cpu|mem|disk|all> [simpan_log: 1|0]
+run_scope() {
+  local scope=$1 dolog=${2:-1}
+  collect
+  render_scope "$scope"
   if (( dolog )); then
     write_log "$scope"
     printf ' %sLOG SAVED%s %s%s%s\n' "$ORG" "$RST" "$WHT" "$LOG_FILE" "$RST"
   fi
 }
 
+# Mode live tanpa flicker:
+#  - data dikumpulkan LEBIH DULU, lalu seluruh frame dirender ke memori
+#  - frame digambar sekali jalan di posisi (0,0); tiap baris dihapus sisanya (\e[K)
+#    sehingga layar tidak pernah kosong (tidak ada 'clear' tiap frame)
+#  - layar alternatif + kursor disembunyikan + auto-wrap dimatikan, dipulihkan saat keluar
+#  - frame dipotong sesuai tinggi terminal supaya tidak scroll
 live() {
+  local rows frame hint out
   trap ':' INT
+  hint=$(printf ' %sLIVE MODE - tekan Ctrl+C untuk berhenti%s' "$DIM" "$RST")
   (
-    trap 'exit 0' INT
+    cleanup() { printf '\e[?7h\e[?25h\e[?1049l'; }
+    trap cleanup EXIT
+    trap 'exit 0' INT TERM
+    LIVE_MODE=1
+    collect                                   # first sample BEFORE switching screens
+    printf '\e[?1049h\e[?25l\e[?7l\e[2J'
     while true; do
-      clear 2>/dev/null
-      run_scope all 0
-      printf ' %sLIVE MODE - tekan Ctrl+C untuk berhenti%s\n' "$DIM" "$RST"
-      sleep 1.5
+      rows=$(tput lines 2>/dev/null || echo 40)
+      frame=$(render_scope all)               # build the whole frame first
+      # trim to the screen height, but always keep the hint as the last line
+      out=$( { printf '%s\n' "$frame" | head -n $(( rows - 2 )); printf '%s\n' "$hint"; } | sed $'s/$/\e[K/' )
+      printf '\e[H%s\e[J' "$out"
+      sleep "$LIVE_INTERVAL"
+      collect                                 # next frame's data, drawn only when ready
     done
   )
   trap - INT
